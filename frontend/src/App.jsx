@@ -191,7 +191,7 @@ export default function App() {
                   Any document in. <span className="hero-accent">Plain language</span> out.
                 </h1>
                 <p className="hero-sub">
-                  Upload a bill, lease, syllabus, or anything else with text on it. Doculyze reads it,
+                  Turn confusing documents into clear explanations. Upload a bill, lease, syllabus, or anything else with text on it. Doculyze reads it,
                   explains it in plain language, flags what's worth double-checking, and reads the
                   summary back to you.
                 </p>
