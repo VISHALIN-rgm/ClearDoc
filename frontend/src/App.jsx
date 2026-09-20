@@ -231,7 +231,7 @@ export default function App() {
       </main>
 
       <footer className="page-footer">
-        <span>Powered by Groq &amp; a local text-to-speech pipeline</span>
+        <span>Powered by AWS</span>
       </footer>
 
       <HistoryPanel
