@@ -1,185 +1,264 @@
 # Doculyze
 
-**Any document in. Plain language out — and read aloud.**
+> **Any document in. Plain language out.**  
+> Turn confusing documents into clear explanations — and listen to the summary out loud.
 
-Doculyze is an AI agent that reads a document — any document — and
-explains it back to you in plain language: what it says, what
-matters, and what to watch out for. Upload a PDF, image, or text file
-and get a structured breakdown: summary, key terms, flagged risks, and
-suggested next actions. The summary is also spoken aloud, so you can
-listen instead of read.
+Doculyze is an AI document assistant that transforms PDFs, images, and text files into structured, easy-to-understand explanations. Upload a document and get:
 
-It behaves like an agent rather than a fixed script: nothing in the
-pipeline is told ahead of time what kind of document it's looking at
-or what to look for in it. Given raw text, it decides for itself what
-the document is, what's worth flagging, and how severe each flag is —
-the same four-step pipeline handles a bill, a lease, a syllabus, or
-anything else without a single if/else branch on document type.
+- A plain-language summary
+- Important terms and details
+- Items worth double-checking
+- Suggested next actions
+- A document-specific chat experience
+- An audio narration of the summary
 
-This runs entirely on your own machine: a local Python backend plus
-a React frontend, no cloud account or infrastructure required. The
-only external services it calls out to are [Groq](https://groq.com)
-for the explanation step and Google's free TTS endpoint for speech.
+It can handle a bill, lease, syllabus, terms-of-service document, or any other document with readable text without asking you to choose a document type first.
 
-## Architecture
+> **Important:** Doculyze provides an explanation and starting point, not legal, financial, medical, or professional advice. Always verify important information with a qualified professional.
 
-```
- ┌──────────┐   POST /upload    ┌───────────────────┐
- │  React   │──────────────────▶│  FastAPI backend   │
- │ frontend │                   │  (localhost:8000)  │
- │(Vite dev │◀──────────────────│                     │
- │  server) │  GET /result/{id} └──────────┬──────────┘
- └──────────┘                              │
-                                            ▼
-                              ┌─────────────────────────┐
-                              │   pipeline.py             │
-                              │                            │
-                              │  1. extract_text()         │  local (pypdf / pytesseract)
-                              │        │                   │
-                              │        ▼                   │
-                              │  2. explain_document()      │  Groq (LLM)
-                              │        │                   │
-                              │        ▼                   │
-                              │  3. synthesize_speech()      │  gTTS (text-to-speech)
-                              │        │                   │
-                              │        ▼                   │
-                              │  4. save_result()            │  local JSON file
-                              └─────────────────────────┘
+## ✨ Product flow
+
+```text
+Upload a document
+        │
+        ▼
+Extract readable text
+        │
+        ▼
+Understand and explain the document
+        │
+        ▼
+Show summary, terms, flags, and actions
+        │
+        ▼
+Generate an audio narration
+        │
+        ▼
+Ask follow-up questions about that document
 ```
 
-Flow: the frontend posts the file (base64) to `/upload` → the backend
-saves it to disk and immediately returns a `documentId`, then keeps
-working in the background → text is pulled out locally (no cloud OCR
-service) → the extracted text is sent to Groq for a structured,
-plain-language explanation → the summary is turned into an MP3
-narration → everything is saved to a small local JSON store → the
-frontend polls `GET /result/{documentId}` until it's ready, including
-an `audioUrl` it plays back.
+## 🏗️ Architecture at a glance
 
-**Uploading opens a dashboard, not an inline card.** The moment a file
-is picked, the app switches from the upload screen to a dedicated
-document view on the same page — a processing screen with a cancel
-(✕) button, then the explanation alongside a chat panel once it's
-ready. Cancelling stops the frontend from waiting immediately, and
-best-effort stops the backend pipeline at its next checkpoint (see
-`cancellation.py`).
+Doculyze is a monorepo with a React/Vite frontend and a FastAPI/Python backend.
 
-**Chat is scoped to the one document.** `POST /chat/{documentId}`
-answers using only that document's extracted text and explanation —
-if the answer isn't in the document, the model is instructed to say
-so rather than guess. Each document also gets a few Groq-generated
-suggested questions shown as starter chips.
+```mermaid
+flowchart LR
+    User([User])
+    Amplify[AWS Amplify<br/>Frontend hosting]
+    React[React + Vite<br/>frontend/]
+    API[FastAPI API<br/>backend/app.py]
+    Pipeline[Background pipeline<br/>backend/pipeline.py]
+    Extract[Text extraction<br/>pypdf + Tesseract]
+    LLM[Groq LLM<br/>structured explanation]
+    TTS[gTTS<br/>MP3 narration]
+    Store[(Local JSON storage<br/>uploads, results, audio)]
 
-**Recent documents get a history panel with delete.** `GET /results`
-backs a slide-out panel of past documents; each has a delete (trash)
-icon that calls `DELETE /result/{documentId}` to remove its stored
-result, uploaded file, and audio narration together.
-
-**Why a background task instead of an orchestration service:** the
-whole pipeline is one Python function (`pipeline.py`) run after the
-HTTP response is sent, so there's no separate workflow service to
-deploy or reason about — the four steps just run in order, in-process.
-
-**Why the pipeline doesn't branch on document type:** the same
-sequence — extract, explain, speak, save — runs regardless of what's
-uploaded. The "what kind of document is this" judgment is left
-entirely to the Groq prompt (`backend/prompts.py`), which asks the
-model to identify the document type itself rather than the code
-assuming it ahead of time.
-
-## Repo layout
-
-```
-doculyze/
-├── backend/    FastAPI app + the extract/explain/speak/save pipeline (Python)
-├── frontend/   React + Vite single-page app (glassmorphism UI)
-├── docs/       architecture notes, sample docs, demo script
-└── scripts/    local run + seed helpers
+    User --> Amplify
+    Amplify --> React
+    React -->|POST /upload| API
+    React -->|GET /result/{id}<br/>GET /results<br/>POST /chat/{id}| API
+    API --> Pipeline
+    Pipeline --> Extract
+    Extract --> LLM
+    LLM --> TTS
+    TTS --> Store
+    Pipeline --> Store
+    API --> Store
+    API -->|JSON results + audio URL| React
 ```
 
-### Backend modules
+### Request and processing flow
 
-| Module | Does |
+1. The user selects a PDF, image, or text file in the React frontend.
+2. The frontend sends the file to `POST /upload`.
+3. FastAPI stores the upload and immediately returns a `documentId`.
+4. A background task runs the processing pipeline:
+   - Extract text locally using `pypdf` or Tesseract OCR.
+   - Send the extracted text to Groq for a structured explanation.
+   - Convert the summary into speech with gTTS.
+   - Save the result, document metadata, and audio path.
+5. The frontend polls `GET /result/{id}` until processing is complete.
+6. The user sees the explanation and can ask questions scoped to the uploaded document.
+
+### Why this behaves like an agent
+
+The pipeline does not branch on hardcoded document types. The model identifies what the document is, decides what matters, and determines what should be flagged. The same pipeline can process a bill, lease, syllabus, or another text-based document.
+
+## ☁️ Deployment
+
+### Frontend: AWS Amplify
+
+The frontend is deployed on **AWS Amplify** from the `main` branch. The repository uses a root-level `amplify.yml` monorepo configuration, which tells Amplify to build the application from `frontend/`.
+
+```yaml
+version: 1
+applications:
+  - appRoot: frontend
+    frontend:
+      phases:
+        preBuild:
+          commands:
+            - npm ci
+        build:
+          commands:
+            - npm run build
+      artifacts:
+        baseDirectory: dist
+        files:
+          - '**/*'
+      cache:
+        paths:
+          - node_modules/**/*
+```
+
+Amplify runs the following production steps:
+
+```bash
+cd frontend
+npm ci
+npm run build
+```
+
+The generated Vite files are published from `frontend/dist`.
+
+### Backend
+
+The backend is a FastAPI service. Configure the frontend API URL using `frontend/.env`:
+
+```bash
+VITE_API_BASE_URL=http://localhost:8000
+```
+
+For production, replace the local URL with the publicly reachable URL of the deployed backend.
+
+> The frontend and backend must be deployed separately unless the backend is hosted behind the same service or domain. AWS Amplify hosts the frontend; it does not automatically host this FastAPI service.
+
+## 📁 Repository layout
+
+```text
+ClearDoc/
+├── amplify.yml                 # AWS Amplify monorepo build configuration
+├── backend/                    # FastAPI service and document pipeline
+│   ├── app.py                 # API routes
+│   ├── extraction.py          # PDF and image text extraction
+│   ├── groq_service.py        # LLM explanation and document chat
+│   ├── pipeline.py            # Extract → explain → speak → save
+│   ├── prompts.py             # LLM prompts
+│   ├── storage.py             # Local JSON result storage
+│   └── tts_service.py         # Audio narration generation
+├── frontend/                   # React + Vite application
+│   ├── src/
+│   ├── package.json
+│   ├── package-lock.json
+│   └── amplify.yml            # Legacy/local frontend config
+├── docs/                       # Architecture notes and sample documents
+└── scripts/                    # Local run and seed helpers
+```
+
+## 🧩 Backend modules
+
+| Module | Purpose |
 |---|---|
-| `app.py` | FastAPI routes: `POST /upload`, `GET/POST /chat/{id}`, `POST /cancel/{id}`, `DELETE /result/{id}`, `GET /result/{id}`, `GET /results`, serves `/audio/*` |
-| `cancellation.py` | In-memory cancel flags the pipeline checks between steps |
-| `extraction.py` | Pulls text out of PDFs (`pypdf`) and images (`pytesseract` OCR) |
-| `groq_service.py` | Sends extracted text to Groq, parses the structured JSON explanation |
-| `tts_service.py` | Turns the summary into speech (`gTTS`), saved as an MP3 |
-| `pipeline.py` | Runs the four steps above in order, in a background task |
-| `storage.py` | Local JSON-file result store (keyed by `documentId`) |
-| `prompts.py` | The system prompt sent to Groq |
+| `app.py` | FastAPI routes for upload, polling, chat, cancellation, history, and audio |
+| `cancellation.py` | Best-effort cancellation flags for in-progress jobs |
+| `extraction.py` | Extracts text from PDFs and images |
+| `groq_service.py` | Generates structured explanations and document-specific chat replies |
+| `pipeline.py` | Runs extraction, explanation, speech, and storage in order |
+| `prompts.py` | System and user prompts sent to the model |
+| `storage.py` | Saves and retrieves local JSON results |
+| `tts_service.py` | Creates MP3 narration from the document summary |
 
-## Prerequisites
+## 🚀 Run locally
+
+### Prerequisites
 
 - Python 3.10+
 - Node.js 18+
-- A free [Groq API key](https://console.groq.com/keys)
-- [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) installed
-  on your system, **only if** you want to upload scanned images —
-  PDF and `.txt` uploads don't need it.
-  - macOS: `brew install tesseract`
-  - Ubuntu/Debian: `sudo apt install tesseract-ocr`
-  - Windows: [installer here](https://github.com/UB-Mannheim/tesseract/wiki)
-- An internet connection (Groq's API and Google's TTS endpoint are both
-  remote calls — nothing in the pipeline runs fully offline)
+- A Groq API key
+- Tesseract OCR, only when processing scanned images
+- Internet access for Groq and gTTS
 
-## Run the backend
+### 1. Configure and run the backend
 
 ```bash
 cd backend
 python3 -m venv venv
-source venv/bin/activate        # Windows: venv\Scripts\activate
+source venv/bin/activate       # Windows: venv\\Scripts\\activate
 pip install -r requirements.txt
-cp .env.example .env            # paste in your GROQ_API_KEY
+cp .env.example .env          # add your GROQ_API_KEY
 uvicorn app:app --reload --port 8000
 ```
 
-The API is now at `http://localhost:8000` (check `GET /health`).
+The API runs at `http://localhost:8000`.
 
-## Run the frontend
+### 2. Configure and run the frontend
 
 ```bash
 cd frontend
 npm install
-cp .env.example .env            # defaults to http://localhost:8000, change if needed
-npm run dev                     # local dev, http://localhost:5173
-npm run build                   # production build (dist/) — serve with any static host
+cp .env.example .env          # defaults to http://localhost:8000
+npm run dev
 ```
 
-The app is a single page — hero, upload box, results, and the
-How It Works / Why Doculyze / Use Cases / FAQ sections all live on one
-scroll, with in-page anchor navigation.
+The frontend runs at `http://localhost:5173`.
 
-## Run both at once
+### 3. Run both services together
+
+From the repository root:
 
 ```bash
 ./scripts/run.sh
 ```
 
-Starts the backend on :8000 and the frontend dev server on :5173, and
-stops both when you press Ctrl+C. The first run still needs
-`backend/.env` and `frontend/.env` set up as above, and both
-`pip install` / `npm install` already done.
+## 🧪 Testing
 
-## Local test data
-
-`scripts/seed_test_data.sh` uploads a couple of sample documents from
-`docs/sample-documents/` straight to the running backend via `curl`,
-so you can watch the pipeline run end-to-end without using the UI.
-
-```bash
-./scripts/seed_test_data.sh
-```
-
-## Running backend tests
+Backend tests mock the Groq and gTTS calls, so they can run without real external API requests:
 
 ```bash
 cd backend
-pip install -r requirements.txt   # includes pytest + httpx
 python3 -m pytest tests/ -v
 ```
 
-All tests mock the Groq and gTTS calls, so they run offline and don't
-need a real API key.
+Build the frontend locally before deploying:
 
+```bash
+cd frontend
+npm run build
+```
+
+## 🔌 API overview
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/upload` | Upload a document and start processing |
+| `GET` | `/result/{id}` | Poll one document's processing status |
+| `GET` | `/results` | List recent documents |
+| `GET` | `/result/{id}` | Retrieve one completed result |
+| `POST` | `/chat/{id}` | Ask a question about one document |
+| `POST` | `/cancel/{id}` | Request cancellation of a processing job |
+| `DELETE` | `/result/{id}` | Delete a result, upload, and audio file |
+| `GET` | `/audio/{filename}` | Serve generated narration audio |
+| `GET` | `/health` | Check whether the API is running |
+
+## 🔐 Environment variables
+
+### Backend: `backend/.env`
+
+```bash
+GROQ_API_KEY=your_groq_api_key
+GROQ_MODEL=openai/gpt-oss-120b
+PUBLIC_BASE_URL=http://localhost:8000
+```
+
+### Frontend: `frontend/.env`
+
+```bash
+VITE_API_BASE_URL=http://localhost:8000
+```
+
+## 📌 Current limitations
+
+- Local JSON storage is intended for a simple deployment and demo; a multi-user production deployment should use a database and object storage.
+- The backend must be publicly reachable for an Amplify-hosted frontend to call it.
+- Tesseract is required for scanned image OCR.
+- Explanations should be reviewed before making important decisions.
